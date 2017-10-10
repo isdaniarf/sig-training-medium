@@ -108,8 +108,8 @@ public class BasicConformityMonkeyContext extends BasicSimianArmyContext impleme
         String dbPass = configuration().getStr("simianarmy.recorder.db.pass");
         String dbUrl = configuration().getStr("simianarmy.recorder.db.url");
         String dbTable = configuration().getStr("simianarmy.conformity.resources.db.table");
-        
-        if (dbDriver == null) {       
+
+        if (dbDriver == null) {
         	clusterTracker = new SimpleDBConformityClusterTracker(awsClient(), sdbDomain);
         } else {
         	RDSConformityClusterTracker rdsClusterTracker = new RDSConformityClusterTracker(dbDriver, dbUser, dbPass, dbUrl, dbTable);
@@ -120,6 +120,40 @@ public class BasicConformityMonkeyContext extends BasicSimianArmyContext impleme
         ruleEngine = new ConformityRuleEngine();
         boolean eurekaEnabled = configuration().getBoolOrElse("simianarmy.conformity.Eureka.enabled", false);
 
+        initializeDiscoveryClient(eurekaEnabled);
+
+        if (configuration().getBoolOrElse(
+                "simianarmy.conformity.rule.InstanceInSecurityGroup.enabled", false)) {
+            String requiredSecurityGroups = configuration().getStr(
+                    "simianarmy.conformity.rule.InstanceInSecurityGroup.requiredSecurityGroups");
+            if (!StringUtils.isBlank(requiredSecurityGroups)) {
+                ruleEngine.addRule(new InstanceInSecurityGroup(getAwsCredentialsProvider(),
+                        StringUtils.split(requiredSecurityGroups, ",")));
+            } else {
+                LOGGER.info("No required security groups is specified, "
+                        + "the conformity rule InstanceInSecurityGroup is ignored.");
+            }
+        }
+
+        addRules();
+
+        createClient(region());
+        regionToAwsClient.put(region(), awsClient());
+
+        clusterCrawler = new AWSClusterCrawler(regionToAwsClient, configuration());
+        sesClient = new AmazonSimpleEmailServiceClient();
+        if (configuration().getStr("simianarmy.aws.email.region") != null) {
+          sesClient.setRegion(Region.getRegion(Regions.fromName(configuration().getStr("simianarmy.aws.email.region"))));
+        }
+        defaultEmail = configuration().getStrOrElse("simianarmy.conformity.notification.defaultEmail", null);
+        ccEmails = StringUtils.split(
+                configuration().getStrOrElse("simianarmy.conformity.notification.ccEmails", ""), ",");
+        sourceEmail = configuration().getStrOrElse("simianarmy.conformity.notification.sourceEmail", null);
+        conformityEmailBuilder = new BasicConformityEmailBuilder();
+        emailNotifier = new ConformityEmailNotifier(getConformityEmailNotifierContext());
+    }
+
+    private void initializeDiscoveryClient(boolean eurekaEnabled) {
         if (eurekaEnabled) {
             LOGGER.info("Initializing Discovery client.");
             Injector injector = Guice.createInjector(new EurekaModule());
@@ -140,24 +174,13 @@ public class BasicConformityMonkeyContext extends BasicSimianArmyContext impleme
         } else {
             LOGGER.info("Discovery/Eureka is not enabled, the conformity rules that need Eureka are not added.");
         }
+    }
 
-        if (configuration().getBoolOrElse(
-                "simianarmy.conformity.rule.InstanceInSecurityGroup.enabled", false)) {
-            String requiredSecurityGroups = configuration().getStr(
-                    "simianarmy.conformity.rule.InstanceInSecurityGroup.requiredSecurityGroups");
-            if (!StringUtils.isBlank(requiredSecurityGroups)) {
-                ruleEngine.addRule(new InstanceInSecurityGroup(getAwsCredentialsProvider(),
-                        StringUtils.split(requiredSecurityGroups, ",")));
-            } else {
-                LOGGER.info("No required security groups is specified, "
-                        + "the conformity rule InstanceInSecurityGroup is ignored.");
-            }
-        }
-
+    private void addRules() {
         if (configuration().getBoolOrElse(
                 "simianarmy.conformity.rule.InstanceTooOld.enabled", false)) {
-                ruleEngine.addRule(new InstanceTooOld(getAwsCredentialsProvider(), (int) configuration().getNumOrElse(
-                        "simianarmy.conformity.rule.InstanceTooOld.instanceAgeThreshold", 180)));
+            ruleEngine.addRule(new InstanceTooOld(getAwsCredentialsProvider(), (int) configuration().getNumOrElse(
+                    "simianarmy.conformity.rule.InstanceTooOld.instanceAgeThreshold", 180)));
         }
 
         if (configuration().getBoolOrElse(
@@ -167,28 +190,13 @@ public class BasicConformityMonkeyContext extends BasicSimianArmyContext impleme
 
         if (configuration().getBoolOrElse(
                 "simianarmy.conformity.rule.InstanceInVPC.enabled", false)) {
-                ruleEngine.addRule(new InstanceInVPC(getAwsCredentialsProvider()));
+            ruleEngine.addRule(new InstanceInVPC(getAwsCredentialsProvider()));
         }
 
         if (configuration().getBoolOrElse(
                 "simianarmy.conformity.rule.CrossZoneLoadBalancing.enabled", false)) {
-                ruleEngine().addRule(new CrossZoneLoadBalancing(getAwsCredentialsProvider()));
+            ruleEngine().addRule(new CrossZoneLoadBalancing(getAwsCredentialsProvider()));
         }
-        
-        createClient(region());
-        regionToAwsClient.put(region(), awsClient());
-
-        clusterCrawler = new AWSClusterCrawler(regionToAwsClient, configuration());
-        sesClient = new AmazonSimpleEmailServiceClient();
-        if (configuration().getStr("simianarmy.aws.email.region") != null) {
-          sesClient.setRegion(Region.getRegion(Regions.fromName(configuration().getStr("simianarmy.aws.email.region"))));
-        }        
-        defaultEmail = configuration().getStrOrElse("simianarmy.conformity.notification.defaultEmail", null);
-        ccEmails = StringUtils.split(
-                configuration().getStrOrElse("simianarmy.conformity.notification.ccEmails", ""), ",");
-        sourceEmail = configuration().getStrOrElse("simianarmy.conformity.notification.sourceEmail", null);
-        conformityEmailBuilder = new BasicConformityEmailBuilder();
-        emailNotifier = new ConformityEmailNotifier(getConformityEmailNotifierContext());
     }
 
     public ConformityEmailNotifier.Context getConformityEmailNotifierContext() {
